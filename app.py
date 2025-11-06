@@ -130,7 +130,7 @@ def calcular_horas_dia_excel(dia: dict) -> float:
 
 def exportar_mes_xlsx(ano_mes: str, funcionarios: dict, registros: dict, eventos: list[str]) -> str:
     """
-    Gera export/<YYYY-MM>_registros.xlsx
+    Gera export/<MM-YYYY>_registros.xlsx
     - Uma aba por funcionário (com dados do mês)
     - Aba 'Resumo' com total de horas por funcionário
     Retorna caminho do arquivo gerado.
@@ -139,7 +139,9 @@ def exportar_mes_xlsx(ano_mes: str, funcionarios: dict, registros: dict, eventos
         raise ValueError("Use o formato YYYY-MM (ex.: 2025-11)")
 
     os.makedirs("export", exist_ok=True)
-    caminho = os.path.join("export", f"{ano_mes}_registros.xlsx")
+    nome_arq = f"Registros_{datetime.strptime(ano_mes, '%Y-%m').strftime('%m-%Y')}.xlsx"
+    caminho = os.path.join("export", nome_arq)
+
 
     wb = Workbook()
     # Estilos
@@ -181,9 +183,10 @@ def exportar_mes_xlsx(ano_mes: str, funcionarios: dict, registros: dict, eventos
                 dia_semana = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"][dt.weekday()]
             except Exception:
                 dia_semana = ""
-
+            
+            data_br = datetime.strptime(data_str, "%Y-%m-%d").strftime("%d/%m/%Y")
             row = [
-                data_str,
+                data_br,
                 dia_semana,
                 dia.get("entrada", ""),
                 dia.get("saida_intervalo", ""),
@@ -439,20 +442,45 @@ with ui.tab_panels(tabs, value='Conexão').classes('w-full'):
 
         ui.button('Remover funcionário', color='red', on_click=remover_agora)
 
-    # ====== ABA REGISTROS ======
+# ====== ABA REGISTROS ======
     with ui.tab_panel('Registros por Funcionário'):
         ui.label('Registros por funcionário').classes('text-lg font-medium')
-        data_escolhida = ui.input('Data (YYYY-MM-DD)', value=datetime.now().strftime("%Y-%m-%d"))
+
+        # --- helpers de datas ---
+        def coletar_datas_disponiveis():
+            """Retorna (options_dict, default_iso): options = {ISO: 'DD/MM/AAAA'}, ordenadas por mais recente."""
+            datas = set()
+            for _uid, dias in registros.items():
+                datas.update(dias.keys())
+            if not datas:
+                hoje_iso = datetime.now().strftime("%Y-%m-%d")
+                return {hoje_iso: datetime.strptime(hoje_iso, "%Y-%m-%d").strftime("%d/%m/%Y")}, hoje_iso
+
+            # ordena ISO desc (mais recente primeiro)
+            ordenadas = sorted(datas, reverse=True)
+            options = {iso: datetime.strptime(iso, "%Y-%m-%d").strftime("%d/%m/%Y") for iso in ordenadas}
+            return options, ordenadas[0]  # default = mais recente
+
+        datas_options, default_iso = coletar_datas_disponiveis()
+
+        # select de datas (value = ISO; label = BR)
+        datas_select = ui.select(
+            options=datas_options,
+            value=default_iso,
+            label='Data'
+        ).classes('min-w-[210px]')
+
         batidas_container = ui.column().classes('w-full')
 
         def desenhar_batidas_por_func():
             batidas_container.clear()
-            data = (data_escolhida.value or '').strip() or datetime.now().strftime("%Y-%m-%d")
-            data_escolhida.value = data
+            data_iso = datas_select.value or datetime.now().strftime("%Y-%m-%d")
+            data_br = datetime.strptime(data_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+
             for uid, nome in sorted(funcionarios.items(), key=lambda x: x[1].lower()):
-                dia = registros.get(uid, {}).get(data, {})
+                dia = registros.get(uid, {}).get(data_iso, {})
                 with batidas_container:
-                    with ui.expansion(f'{nome} ({uid})', value=False).classes('w-full'):
+                    with ui.expansion(f'{nome} ({uid}) - {data_br}', value=False).classes('w-full'):
                         with ui.card().classes('w-full'):
                             rows = [{
                                 'entrada': dia.get('entrada', ''),
@@ -470,15 +498,27 @@ with ui.tab_panels(tabs, value='Conexão').classes('w-full'):
                                 rows=rows,
                             ).classes('w-full')
 
+        def atualizar_datas_select():
+            """Recarrega as datas disponíveis e mantém a seleção quando possível."""
+            old_val = datas_select.value
+            options, default_iso_local = coletar_datas_disponiveis()
+            datas_select.options = options
+            # tenta manter a data selecionada; se não existir mais, usa a mais recente
+            datas_select.value = old_val if old_val in options else default_iso_local
+            datas_select.update()
+
         def atualizar_tabela_batidas_por_func():
             desenhar_batidas_por_func()
 
-        ui.button('Atualizar', on_click=atualizar_tabela_batidas_por_func)
+        # quando trocarem a data, redesenha
+        datas_select.on_value_change(lambda _: desenhar_batidas_por_func())
+
+        # primeiro desenho
         desenhar_batidas_por_func()
 
     # ====== ABA REGISTROS TOTAIS ======
     with ui.tab_panel('Registros Totais (Dia)'):
-        ui.label('Registros do dia (em ordem)').classes('text-lg font-medium')
+        ui.label(f'Registros do dia ({datetime.now().strftime("%d/%m/%Y")})').classes('text-lg font-medium')
         with ui.row().classes('w-full'):
             lobby_table = ui.table(
                 columns=[
@@ -507,19 +547,47 @@ with ui.tab_panels(tabs, value='Conexão').classes('w-full'):
         atualizar_lobby_table()
 
     # ====== ABA EXPORTAR EXCEL ======
+
+
     with ui.tab_panel('Exportar Excel'):
         ui.label('Exportar registros para Excel (.xlsx)').classes('text-lg font-medium')
-        mes_in = ui.input('Mês (YYYY-MM)', value=datetime.now().strftime("%Y-%m")).classes('min-w-[160px]')
-        last_export_link = ui.link('', '#')
+        def coletar_meses_disponiveis():
+            """Retorna (options_dict, default_iso):
+            options_dict = { 'YYYY-MM': 'MM/YYYY' }, ordenado do mais recente para o mais antigo."""
+            meses = set()
+            for _uid, dias in registros.items():
+                for data_iso in dias.keys():          # data_iso = 'YYYY-MM-DD'
+                    if len(data_iso) >= 7:
+                        meses.add(data_iso[:7])       # 'YYYY-MM'
+            if not meses:
+                atual_iso = datetime.now().strftime("%Y-%m")
+                return {atual_iso: datetime.strptime(atual_iso, "%Y-%m").strftime("%m/%Y")}, atual_iso
+
+            ordenados = sorted(meses, reverse=True)   # mais recente primeiro
+            options = {m: datetime.strptime(m, "%Y-%m").strftime("%m/%Y") for m in ordenados}
+            return options, ordenados[0]
+
+        mes_options, mes_default = coletar_meses_disponiveis()
+        mes_select = ui.select(options=mes_options, value=mes_default, label='Mês (MM/YYYY)').classes('min-w-[200px]')
+        last_export_link = ui.link('', '#', new_tab=True)
 
         def exportar_xlsx_ui():
-            ano_mes = (mes_in.value or '').strip()
+            mes_iso = (mes_select.value or '').strip()
             try:
-                caminho = exportar_mes_xlsx(ano_mes, funcionarios, registros, EVENTOS)
+                caminho = exportar_mes_xlsx(mes_iso, funcionarios, registros, EVENTOS)
                 ui.notify(f'Arquivo gerado: {caminho}', type='positive')
+
+                # 1) download imediato pelo botão
+                ui.download(caminho)
+
+                # 2) link para abrir em nova aba (sem forçar download)
                 url = f"/data/{caminho.replace(os.sep, '/')}"
-                last_export_link.text = f"Abrir {os.path.basename(caminho)}"
+                fname = os.path.basename(caminho)
+                last_export_link.text = f"Abrir {fname}"
                 last_export_link.href = url
+                # remova qualquer atributo 'download' que tenha ficado
+                last_export_link.props(remove='download')
+
             except Exception as e:
                 ui.notify(f'Erro: {e}', type='negative')
 
@@ -537,7 +605,7 @@ def push_log(texto, tipo="info"):
         ui.notify(texto, type='negative', position='top-right')
 
 def ui_tick():
-    # define o texto e estilo conforme o status
+    # status destacado
     if serial_connected:
         status_label.text = f'CONECTADO ({PORTA_ATUAL})'
         status_label.classes(replace='text-white bg-green-600 px-3 py-1 rounded font-bold shadow')
@@ -545,23 +613,52 @@ def ui_tick():
         status_label.text = 'DESCONECTADO'
         status_label.classes(replace='text-white bg-red-600 px-3 py-1 rounded font-bold shadow pulse')
 
+    # helper para atualizar telas/listas após um evento de leitura
+    def _refresh_views():
+        # atualiza listas/tabelas das outras abas
+        try:
+            atualizar_tabela_batidas_por_func()
+        except:
+            pass
+        try:
+            atualizar_lobby_table()
+        except:
+            pass
+        # (opcional) se você criou a lista de datas na aba "Registros por Funcionário"
+        try:
+            atualizar_datas_select()
+        except:
+            pass
+        # atualiza lista de meses na aba "Exportar Excel"
+        try:
+            new_opts, new_default = coletar_meses_disponiveis()
+            mes_select.options = new_opts
+            if mes_select.value not in new_opts:
+                mes_select.value = new_default
+            mes_select.update()
+        except Exception as e:
+            print(f"[WARN] Falha ao atualizar lista de meses: {e}")
+
     try:
         while True:
             kind, payload = serial_queue.get_nowait()
+
             if kind == "ok":
                 push_log(payload, "ok")
-                atualizar_tabela_batidas_por_func()
-                atualizar_lobby_table()
+                _refresh_views()
+
             elif kind == "err":
                 push_log(payload, "err")
-                atualizar_tabela_batidas_por_func()
-                atualizar_lobby_table()
+                _refresh_views()  # <<< também atualiza no erro
+
             elif kind == "log":
                 push_log(payload, "info")
+
             elif kind == "uid_captured":
                 uid_in.value = payload
                 uid_in.update()
                 ui.notify(f'UID capturado: {payload}', type='positive')
+
     except queue.Empty:
         pass
 
