@@ -26,6 +26,8 @@ ultimas_batidas = {}
 serial_thread = None
 serial_stop_flag = threading.Event()
 serial_port = None
+# pausa a leitura da thread serial durante operações exclusivas (ex.: EDUMP)
+serial_pause_flag = threading.Event()
 serial_connected = False
 serial_queue = queue.Queue()    # ('ok'|'err'|'log'|'uid_captured', payload)
 PORTA_ATUAL = None
@@ -35,6 +37,128 @@ capture_uid_mode = False
 capture_lock = threading.Lock()
 
 # FUNÇÕES AUXILIARES
+def mesclar_scans_jsonl(lines, registros, funcionarios):
+    """
+    lines: lista de strings JSON no formato:
+      {"uid":"AABBCCDD","ts":"YYYY-MM-DDTHH:MM:SS","src":"eeprom"}
+    Vamos:
+      - ignorar UIDs que NÃO estão cadastrados em `funcionarios`
+      - agrupar por (uid, data) e ordenar por hora
+      - preencher eventos na ordem: entrada, saida_intervalo, volta_intervalo, saida
+    Retorna (novos:int, ignorados:int)
+    """
+    novos = 0
+    ignorados = 0
+
+    # normaliza conjunto de UIDs válidos (cadastrados)
+    uids_validos = set([u.strip().upper() for u in funcionarios.keys()])
+
+    # bucketiza por (uid, data) → [HH:MM,...]
+    buckets = {}
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+
+        uid = (obj.get("uid") or "").strip().upper()
+        ts  = (obj.get("ts")  or "").strip()
+
+        # valida UID cadastrado
+        if not uid or uid not in uids_validos:
+            ignorados += 1
+            continue
+
+        # valida timestamp
+        if len(ts) < 19:
+            ignorados += 1
+            continue
+        try:
+            dt = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+        except Exception:
+            ignorados += 1
+            continue
+
+        data_iso = dt.strftime("%Y-%m-%d")
+        hora     = dt.strftime("%H:%M")
+        buckets.setdefault((uid, data_iso), []).append(hora)
+
+    # aplica nos registros existentes
+    for (uid, data_iso), horas in buckets.items():
+        horas.sort()
+        if uid not in registros:
+            registros[uid] = {}
+        dia = registros[uid].setdefault(data_iso, {})
+        for h in horas:
+            if all(ev in dia for ev in EVENTOS):
+                break
+            ev = next((e for e in EVENTOS if e not in dia), None)
+            if ev and h:
+                dia[ev] = h
+                novos += 1
+
+    return novos, ignorados
+
+def _sync_eeprom_on_connect(ser):
+    """Sincroniza EEPROM usando uma conexão serial TEMPORÁRIA (antes da thread começar)."""
+    try:
+        try: ser.reset_input_buffer()
+        except: pass
+
+        ser.write(b"EDUMP\n")
+        linhas, started = [], False
+        t0 = time.time()
+        while time.time() - t0 < 15.0:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            if not line:
+                continue
+            if line == 'EBEGIN':
+                started = True
+                continue
+            if line == 'EEND':
+                break
+            if started:
+                linhas.append(line)
+
+        if not started:
+            ui.notify('Arduino não respondeu ao EDUMP na conexão.', type='warning')
+            return
+
+        # usa a versão validando contra funcionarios
+        try:
+            novos, ignorados = mesclar_scans_jsonl(linhas, registros, funcionarios)
+        except TypeError:
+            # fallback caso sua mesclar_scans_jsonl antiga tenha assinatura (lines, registros)
+            novos = mesclar_scans_jsonl(linhas, registros)
+            ignorados = 0
+
+        if novos > 0:
+            salvar_json(ARQ_REG, registros)
+            try:
+                ser.write(b"ECLEAR\n")
+            except:
+                pass
+            msg = f'Sync inicial: {novos} batida(s)'
+            if ignorados:
+                msg += f' • {ignorados} ignorada(s) (UID não cadastrado)'
+            ui.notify(msg + '.', type='positive')
+            try: atualizar_tabela_batidas_por_func()
+            except: pass
+            try: atualizar_lobby_table()
+            except: pass
+        else:
+            if ignorados:
+                ui.notify(f'Sync inicial: 0 válidas, {ignorados} ignorada(s).', type='warning')
+            else:
+                ui.notify('Sem batidas pendentes na EEPROM.', type='info')
+
+    except Exception as e:
+        ui.notify(f'Falha no sync inicial: {e}', type='negative')
+
+
 def carregar_json(path, default):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -265,14 +389,101 @@ def exportar_mes_xlsx(ano_mes: str, funcionarios: dict, registros: dict, eventos
     return caminho
 
 # FUNÇÕES DE THREAD SERIAL
-def serial_worker(port_name):
+def serial_worker(port_name, do_initial_sync: bool = True):
     global serial_connected, serial_port, capture_uid_mode
     try:
         with serial.Serial(port_name, BAUDRATE, timeout=TIMEOUT) as ar:
             serial_port = ar
             serial_connected = True
             serial_queue.put(("log", f"[SERIAL] Conectado em {port_name} @ {BAUDRATE}"))
+
+            # ===== SYNC INICIAL (EDUMP) =====
+            if do_initial_sync:
+                try:
+                    # 1) dá tempo do Arduino resetar ao abrir a porta
+                    time.sleep(2.0)
+
+                    def _drain(port, dur=0.8):
+                        end = time.time() + dur
+                        while time.time() < end:
+                            try:
+                                line = port.readline().decode("utf-8", errors="ignore").strip()
+                                if not line:
+                                    break
+                                # joga fora quaisquer banners tipo "READY", "Comandos:", etc.
+                            except Exception:
+                                break
+
+                    def _edump_once(port, timeout_total=15.0):
+                        try:
+                            port.reset_input_buffer()
+                        except Exception:
+                            pass
+                        # manda CRLF por compatibilidade
+                        port.write(b"EDUMP\r\n")
+                        linhas = []
+                        started = False
+                        t0 = time.time()
+                        while time.time() - t0 < timeout_total:
+                            line = port.readline().decode("utf-8", errors="ignore").strip()
+                            if not line:
+                                continue
+                            if line == "EBEGIN":
+                                started = True
+                                continue
+                            if line == "EEND":
+                                break
+                            if started:
+                                linhas.append(line)
+                        return started, linhas
+
+                    # drena lixo inicial e tenta EDUMP
+                    _drain(ar)
+                    started, linhas = _edump_once(ar, timeout_total=15.0)
+
+                    # se não iniciou, tenta mais uma vez após um pequeno atraso
+                    if not started:
+                        serial_queue.put(("log", "[SYNC] 1ª tentativa sem EBEGIN; tentando novamente..."))
+                        time.sleep(0.8)
+                        _drain(ar, dur=0.5)
+                        started, linhas = _edump_once(ar, timeout_total=15.0)
+
+                    if not started:
+                        serial_queue.put(("log", "[SYNC] Arduino não respondeu ao EDUMP na conexão."))
+                    else:
+                        try:
+                            novos, ignorados = mesclar_scans_jsonl(linhas, registros, funcionarios)
+                        except TypeError:
+                            # fallback se sua função antiga não recebe 'funcionarios'
+                            novos = mesclar_scans_jsonl(linhas, registros)
+                            ignorados = 0
+
+                        if novos > 0:
+                            salvar_json(ARQ_REG, registros)
+                            try:
+                                ar.write(b"ECLEAR\r\n")
+                            except Exception:
+                                pass
+                            msg = f"[SYNC] Importadas {novos} batidas pendentes"
+                            if ignorados:
+                                msg += f" • {ignorados} ignoradas (UID não cadastrado)"
+                            serial_queue.put(("ok", msg))
+                        else:
+                            if ignorados:
+                                serial_queue.put(("log", f"[SYNC] 0 válidas, {ignorados} ignoradas (UID não cadastrado)."))
+                            else:
+                                serial_queue.put(("log", "[SYNC] Sem batidas pendentes na EEPROM."))
+                except Exception as e:
+                    serial_queue.put(("log", f"[SYNC] Falha no sync inicial: {e}"))
+
+
+            # ===== LOOP NORMAL =====
             while not serial_stop_flag.is_set():
+                # se estiver em pausa (alguma operação exclusiva futura), respeita
+                if 'serial_pause_flag' in globals() and serial_pause_flag.is_set():
+                    time.sleep(0.05)
+                    continue
+
                 try:
                     linha = ar.readline().decode("utf-8", errors="ignore").strip()
                     if not linha:
@@ -280,7 +491,8 @@ def serial_worker(port_name):
                     uid = extrair_uid(linha)
                     if uid is None:
                         continue
-                    # modo captura
+
+                    # --- modo captura (cadastro) ---
                     with capture_lock:
                         if capture_uid_mode:
                             try:
@@ -290,19 +502,23 @@ def serial_worker(port_name):
                             serial_queue.put(("uid_captured", uid))
                             capture_uid_mode = False
                             continue
-                    # modo normal
+
+                    # --- modo normal ---
                     ok, info, evento = registrar_batida(uid)
                     try:
                         ar.write(b"OK\n" if ok else b"ERR\n")
                     except Exception as ew:
                         serial_queue.put(("log", f"[WARN] Falha ao enviar ACK: {ew}"))
+
                     if ok:
                         serial_queue.put(("ok", f"[OK] {info}"))
                     else:
                         serial_queue.put(("err", f"[ERR] UID {uid}: {info}"))
+
                 except Exception as e:
                     serial_queue.put(("log", f"[WARN] Leitura: {e}"))
                     time.sleep(0.3)
+
     except Exception as e:
         serial_queue.put(("log", f"[ERRO] Não abriu {port_name}: {e}"))
     finally:
@@ -349,11 +565,14 @@ with ui.tab_panels(tabs, value='Conexão').classes('w-full'):
                     ui.notify('Já conectado', type='warning'); return
                 if not portas_select.value:
                     ui.notify('Selecione uma porta', type='warning'); return
+
                 PORTA_ATUAL = portas_select.value
-                serial_stop_flag.clear()
-                serial_thread = threading.Thread(target=serial_worker, args=(PORTA_ATUAL,), daemon=True)
-                serial_thread.start()
                 ui.notify(f'Conectando em {PORTA_ATUAL}...', type='info')
+
+                serial_stop_flag.clear()
+                # passa do_initial_sync=True para a thread fazer EDUMP/ECLEAR automaticamente
+                serial_thread = threading.Thread(target=serial_worker, args=(PORTA_ATUAL, True), daemon=True)
+                serial_thread.start()
 
             def desconectar():
                 if not serial_connected:
