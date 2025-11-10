@@ -2,13 +2,22 @@
   "54F7F704": {
     "2025-11-07": {
       "entrada": "22:12",
-      "saida_intervalo": "22:21"
+      "saida_intervalo": "22:21",
+      "volta_intervalo": "22:17"
+    },
+    "2025-11-09": {
+      "entrada": "22:43",
+      "saida_intervalo": "22:44"
+    },
+    "2000-01-01": {
+      "entrada": "00:01"
     }
   },
   "71E125A3": {
     "2025-11-07": {
       "entrada": "22:12",
-      "saida_intervalo": "22:22"
+      "saida_intervalo": "22:22",
+      "volta_intervalo": "22:18"
     }
   }
 }
