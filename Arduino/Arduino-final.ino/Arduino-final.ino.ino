@@ -5,36 +5,40 @@
 #include <EEPROM.h>
 
 // ===== RC522 =====
-#define SS_PIN   10
-#define RST_PIN  9
+#define SS_PIN     10
+#define RST_PIN    9
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 
 // ===== RTC =====
 RTC_DS3231 rtc;
 
 // ===== LEDs =====
-#define LED_YELLOW 3
-#define LED_GREEN  4
-#define LED_RED    5
+#define LED_AMARELO 3
+#define LED_VERDE   4
+#define LED_VERMELHO 5
 
-// ===== Tempos =====
-const unsigned long DEBOUNCE_MS       = 1500;  // debounce “rápido” de leitura local
-const unsigned long ACK_TIMEOUT_MS    = 3000;  // espera do ACK do PC
-const unsigned long OFFLINE_YELLOW_MS = 150;  // 0.5s de amarelo quando gravar offline (EEPROM)
-const unsigned long OFFLINE_MIN_GAP_SEC = 60;  // anti-dupe offline por UID (igual ao Python)
+// ===== Tempos (RENOMEADOS E PADRONIZADOS) =====
+const unsigned long DEBOUNCE_MS      = 1500;  // debounce “rápido” de leitura local
+const unsigned long ACK_TIMEOUT_MS   = 1500;  // espera do ACK do PC
+
+// Tempos de feedback visual
+const unsigned long LED_SUCESSO_MS   = 1000;  // Tempo do LED Verde/Sucesso
+const unsigned long LED_ERRO_MS      = 1000;  // Tempo do LED Vermelho/Erro
+
+const unsigned long OFFLINE_MIN_GAP_SEC = 60;  // anti-dupe offline por UID
 
 // Debounce leitura
 String ultimoUID = "";
 unsigned long ultimoMillis = 0;
 
 // ----------------------------------------------------------------------
-//                EEPROM: BUFFER CIRCULAR DE EMERGÊNCIA
+//          EEPROM: BUFFER CIRCULAR DE EMERGÊNCIA
 // ----------------------------------------------------------------------
-static const int HDR_ADDR   = 0;
-static const int HDR_SIZE   = 16;
+static const int HDR_ADDR    = 0;
+static const int HDR_SIZE    = 16;
 static const uint32_t MAGIC = 0x504F4E54UL; // 'P''O''N''T'
-static const int SLOT_SIZE  = 16;
-static const int MAX_SLOTS  = (EEPROM.length() - HDR_SIZE) / SLOT_SIZE;
+static const int SLOT_SIZE   = 16;
+static const int MAX_SLOTS   = (EEPROM.length() - HDR_SIZE) / SLOT_SIZE;
 
 uint16_t e_head  = 0; // próximo slot p/ escrever
 uint16_t e_count = 0; // registros válidos
@@ -138,7 +142,7 @@ bool eeprom_read_slot(uint16_t idx, uint32_t &epoch, byte *uid, byte &uid_len){
   return (crc == stored);
 }
 
-// ===== utils =====
+// ===== utils e comandos seriais =====
 static const char *HX = "0123456789ABCDEF";
 
 String bytes_to_hex(const byte *uid, byte len){
@@ -189,7 +193,7 @@ void cmd_EDUMP_UID(const String &uid_hex){
   }
   byte ref[10]; byte rlen = s.length()/2;
   for (int i=0;i<rlen;i++){
-    uint8_t hi = (s[2*i]   <= '9') ? s[2*i]-'0' : s[2*i]-'A'+10;
+    uint8_t hi = (s[2*i]    <= '9') ? s[2*i]-'0' : s[2*i]-'A'+10;
     uint8_t lo = (s[2*i+1] <= '9') ? s[2*i+1]-'0' : s[2*i+1]-'A'+10;
     ref[i] = (hi<<4) | lo;
   }
@@ -220,10 +224,10 @@ void cmd_EDUMP_CSV(){
     DateTime dt = DateTime(epoch);
     char ts[25];
     snprintf(ts, sizeof(ts), "%04d-%02d-%02dT%02d:%02d:%02d",
-             dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second());
+              dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second());
     String uhex = bytes_to_hex(uid, len);
     Serial.print(uhex); Serial.print(",");
-    Serial.print(ts);   Serial.println(",eeprom");
+    Serial.print(ts);  Serial.println(",eeprom");
   }
 }
 
@@ -247,15 +251,37 @@ void cmd_SETTIME(const String &iso){
 }
 
 // ----------------------------------------------------------------------
-//                        LEDs
+//                        LEDS
 // ----------------------------------------------------------------------
-void setAllOff(){ digitalWrite(LED_YELLOW, LOW); digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, LOW); }
-void showYellow(){ digitalWrite(LED_YELLOW, HIGH); digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, LOW); }
-void showGreen(unsigned long ms=3000){ digitalWrite(LED_YELLOW, LOW); digitalWrite(LED_GREEN, HIGH); digitalWrite(LED_RED, LOW); delay(ms); setAllOff(); }
-void showRed(unsigned long ms=3000){ digitalWrite(LED_YELLOW, LOW); digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, HIGH); delay(ms); setAllOff(); }
+void setAllOff(){ 
+    digitalWrite(LED_AMARELO, LOW); 
+    digitalWrite(LED_VERDE, LOW); 
+    digitalWrite(LED_VERMELHO, LOW); 
+}
+void showYellow(){ 
+    digitalWrite(LED_AMARELO, HIGH); 
+    digitalWrite(LED_VERDE, LOW); 
+    digitalWrite(LED_VERMELHO, LOW); 
+}
+
+void showGreen(){ 
+    digitalWrite(LED_AMARELO, LOW); 
+    digitalWrite(LED_VERDE, HIGH); 
+    digitalWrite(LED_VERMELHO, LOW); 
+    delay(LED_SUCESSO_MS);
+    setAllOff(); 
+}
+
+void showRed(){ 
+    digitalWrite(LED_AMARELO, LOW); 
+    digitalWrite(LED_VERDE, LOW); 
+    digitalWrite(LED_VERMELHO, HIGH); 
+    delay(LED_ERRO_MS);
+    setAllOff(); 
+}
 
 // ----------------------------------------------------------------------
-//                Comando pendente durante espera de ACK
+//         Comando pendente durante espera de ACK
 // ----------------------------------------------------------------------
 enum PendingCmd { CMD_NONE, CMD_EDUMP, CMD_ECLEAR, CMD_STATUS, CMD_EDUMP_CSV, CMD_EDUMP_UID, CMD_SETTIME };
 volatile PendingCmd pending_cmd = CMD_NONE;
@@ -290,7 +316,7 @@ int waitAckFromPython(){
 }
 
 // ----------------------------------------------------------------------
-//         Anti-dupe OFFLINE: cache dos últimos 8 UIDs
+//       Anti-dupe OFFLINE: cache dos últimos 8 UIDs
 // ----------------------------------------------------------------------
 struct LastSeen {
   byte uid[10];
@@ -339,33 +365,32 @@ int upsert_cache(const byte *uid, byte len, uint32_t epoch){
 }
 
 // ----------------------------------------------------------------------
-//                              SETUP
+//                               SETUP
 // ----------------------------------------------------------------------
 void setup(){
-  pinMode(LED_YELLOW, OUTPUT);
-  pinMode(LED_GREEN, OUTPUT);
-  pinMode(LED_RED, OUTPUT);
-  setAllOff();
+    pinMode(LED_AMARELO, OUTPUT); 
+    pinMode(LED_VERDE, OUTPUT);
+    pinMode(LED_VERMELHO, OUTPUT);
 
-  Serial.begin(9600);
-  while(!Serial){;}
+    Serial.begin(9600);
+    while(!Serial){;}
 
-  Wire.begin();
-  rtc.begin();
-  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // use 1x se precisar acertar
+    Wire.begin();
+    rtc.begin();
+    // rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // use 1x se precisar acertar
 
-  SPI.begin();
-  mfrc522.PCD_Init();
-  delay(50);
+    SPI.begin();
+    mfrc522.PCD_Init();
+    delay(50);
 
-  eeprom_load_header();
+    eeprom_load_header();
 
-  // zera cache offline
-  for (int i=0;i<8;i++) offline_cache[i].used = false;
+    // zera cache offline
+    for (int i=0;i<8;i++) offline_cache[i].used = false;
 }
 
 // ----------------------------------------------------------------------
-//                               LOOP
+//                                LOOP
 // ----------------------------------------------------------------------
 void loop(){
   // ---- comandos imediatos vindos do PC ----
@@ -398,7 +423,7 @@ void loop(){
 
   // ---- leitura RFID ----
   if (!mfrc522.PICC_IsNewCardPresent()) return;
-  if (!mfrc522.PICC_ReadCardSerial())   return;
+  if (!mfrc522.PICC_ReadCardSerial())    return;
 
   // status “lendo”
   showYellow();
@@ -428,6 +453,8 @@ void loop(){
   // 2) Espera ACK: OK (1) / ERR (0) / TIMEOUT (-1)
   int ack = waitAckFromPython();
 
+  setAllOff();
+
   if (ack == 1) {
     // ONLINE e OK → verde; não grava EEPROM
     showGreen();
@@ -437,31 +464,34 @@ void loop(){
     showRed();
   }
   else {
-    // TIMEOUT: PC OFFLINE → aplica anti-dupe offline por UID e, se passar, grava EEPROM
+    // TIMEOUT: PC OFFLINE → aplica anti-dupe offline e, se passar, grava EEPROM
     uint32_t nowEpoch = rtc.now().unixtime();
     int idx = find_in_cache(mfrc522.uid.uidByte, mfrc522.uid.size);
+    
+    // 1. Verifica anti-dupe (bateu antes de OFFLINE_MIN_GAP_SEC?)
     if (idx >= 0) {
       uint32_t delta = nowEpoch - offline_cache[idx].lastEpoch;
+      
       if (delta < OFFLINE_MIN_GAP_SEC) {
-        // IGNORADO por anti-dupe offline: mantém amarelo um pouco e apaga
-        delay(300);
-        setAllOff();
-        // finaliza cartão
+        // IGNORADO por anti-dupe offline: MOSTRA VERMELHO
+        showRed(); 
+        
+        // finaliza cartão e sai
         mfrc522.PICC_HaltA();
         mfrc522.PCD_StopCrypto1();
         return;
       }
-      // passou: atualiza e grava
+      
+      // passou: atualiza cache (para que a próxima batida não seja ignorada)
       offline_cache[idx].lastEpoch = nowEpoch;
     } else {
-      // primeira vez desse UID no cache: cadastra e grava
+      // primeira vez desse UID no cache: cadastra
       upsert_cache(mfrc522.uid.uidByte, mfrc522.uid.size, nowEpoch);
     }
 
-    // grava e sinaliza amarelo 1s → verde
+    // 2. Grava e sinaliza sucesso (Offline OK)
     eeprom_push(nowEpoch, mfrc522.uid.uidByte, mfrc522.uid.size);
-    delay(OFFLINE_YELLOW_MS);
-    showGreen();
+    showGreen(); // Feedback visual rápido de sucesso
   }
 
   // Finaliza comunicação com este cartão
