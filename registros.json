@@ -1,23 +1,23 @@
 {
   "54F7F704": {
-    "2025-11-07": {
-      "entrada": "22:12",
-      "saida_intervalo": "22:21",
-      "volta_intervalo": "22:17"
-    },
-    "2025-11-09": {
-      "entrada": "22:43",
-      "saida_intervalo": "22:44"
+    "2025-11-12": {
+      "entrada": "09:25",
+      "saida_intervalo": "09:26",
+      "volta_intervalo": "09:28",
+      "saida": "09:31"
     },
     "2000-01-01": {
-      "entrada": "00:01"
+      "entrada": "00:01",
+      "saida_intervalo": "00:31",
+      "volta_intervalo": "00:19",
+      "saida": "00:21"
     }
   },
   "71E125A3": {
-    "2025-11-07": {
-      "entrada": "22:12",
-      "saida_intervalo": "22:22",
-      "volta_intervalo": "22:18"
+    "2025-11-12": {
+      "entrada": "13:47",
+      "saida_intervalo": "13:50",
+      "volta_intervalo": "13:51"
     }
   }
 }
