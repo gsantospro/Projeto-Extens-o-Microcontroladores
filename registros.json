@@ -1,18 +1,18 @@
 {
   "71E125A3": {
     "2025-11-12": {
-      "entrada": "13:47",
-      "saida_intervalo": "13:50",
-      "volta_intervalo": "13:51",
-      "saida": "13:54"
+      "entrada": "18:33",
+      "saida_intervalo": "21:38",
+      "volta_intervalo": "21:39",
+      "saida": "21:43"
     }
   },
   "54F7F704": {
     "2025-11-12": {
-      "entrada": "14:06",
-      "saida_intervalo": "14:06",
-      "volta_intervalo": "14:18",
-      "saida": "14:22"
+      "entrada": "21:38",
+      "saida_intervalo": "21:39",
+      "volta_intervalo": "21:43",
+      "saida": "23:26"
     }
   }
 }
